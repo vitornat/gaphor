@@ -31,21 +31,43 @@ def type_converter(association, enumerations: Dict = {}) -> Optional[str]:
 
 
 def write_attributes(cls: UML.Class, filename: TextIO) -> None:
-    if not cls.attribute or not cls.attribute[0].name:
+    a: UML.Property
+    have_features = False
+
+    for a in cls.attribute["not it.association"]:  # type: ignore
+        type_value = type_converter(a)
+        filename.write(f"    {a.name}: attribute[{type_value}]\n")
+        have_features = True
+
+    for a in cls.attribute["it.association and it.name"]:  # type: ignore
+        if a.name == "baseClass":
+            continue
+        type_value = type_converter(a)
+        if a.upperValue == "1":
+            filename.write(f"    {a.name}: relation_one[{type_value}]\n")
+        else:
+            filename.write(f"    {a.name}: relation_many[{type_value}]\n")
+        have_features = True
+
+    for o in cls.ownedOperation:
+        filename.write(f"    {o}: operation\n")
+        have_features = True
+
+    if not have_features:
         filename.write("    pass\n\n")
-    else:
-        for a in cls.attribute["not it.association"]:  # type: ignore
-            type_value = type_converter(a)
-            filename.write(f"    {a.name}: attribute[{type_value}]\n")
-        for a in cls.attribute["it.association"]:  # type: ignore
-            type_value = type_converter(a)
-            if a.name == "baseClass":
-                meta_cls = a.association.ownedEnd.class_.name
-                filename.write(f"    {meta_cls}: association\n")
-            else:
-                filename.write(f"    {a.name}: relation_one[{type_value}]\n")
-        for o in cls.ownedOperation:
-            filename.write(f"    {o}: operation\n")
+
+
+def write_class_def(cls, trees, f, cls_written=set()):
+    if cls in cls_written:
+        return
+
+    generalizations = trees[cls]
+    for g in generalizations:
+        write_class_def(g, trees, f, cls_written)
+
+    f.write(f"class {cls.name}({', '.join(g.name for g in generalizations)}):\n")
+    write_attributes(cls, filename=f)
+    cls_written.add(cls)
 
 
 def find_root_nodes(
@@ -96,46 +118,34 @@ def generate(filename, outfile=None, overridesfile=None) -> None:
         uml_classes: List[UML.Class] = []
 
         classes: List = element_factory.lselect(lambda e: e.isKindOf(UML.Class))
-        for idx, cls in enumerate(classes):
-            if cls.name[0] == "~":
-                classes.pop(idx)
+        # Order classes, make output predictable
+        classes = sorted(
+            (cls for cls in classes if cls.name[0] != "~"), key=lambda c: c.name
+        )
+
         for cls in classes:
-            if cls.name in uml_directory:
+            if modeling_language.lookup_element(cls.name):
                 uml_classes.append(cls)
             else:
                 trees[cls] = [g for g in cls.general]
                 for gen in cls.general:
                     referenced.append(gen)
 
+                # Also take into account Stereotype extensions ('baseClass')
+                for attr in cls.attribute["it.name == 'baseClass'"]:
+                    meta_class = attr.association.ownedEnd.class_
+                    trees[cls].append(meta_class)
+                    referenced.append(meta_class)
+
         f.write(f"from gaphor.UML import Element\n")
-        f.write(f"from gaphor.core.modeling.properties import attribute, association\n")
         f.write(
-            f"from gaphor.core.modeling.properties import relation_one, relation_many\n"
+            f"from gaphor.core.modeling.properties import attribute, association, relation_one, relation_many\n"
         )
         for cls in uml_classes:
             f.write(f"from gaphor.UML import {cls.name}\n\n")
 
-        cls_written: Set[Element] = set()
-        root_nodes = find_root_nodes(trees, referenced)
-        for root in root_nodes:
-            cls_search: List = breadth_first_search(trees, root)
-            for cls in cls_search:
-                if cls.name not in cls_written:
-                    if cls.general:
-                        f.write(
-                            f"class {cls.name}("
-                            f"{', '.join(g.name for g in cls.general)}):\n"
-                        )
-                    else:
-                        f.write(f"class {cls.name}:\n")
-                    cls_written.add(cls.name)
-                    write_attributes(cls, filename=f)
-
-        for cls, generalizations in trees.items():
-            if not generalizations:
-                if cls.name not in cls_written:
-                    f.write(f"class {cls.name}:\n")
-                    write_attributes(cls, filename=f)
-                    cls_written.add(cls.name)
+        cls_written: Set[Element] = set(uml_classes)
+        for cls in trees.keys():
+            write_class_def(cls, trees, f, cls_written)
 
     element_factory.shutdown()
