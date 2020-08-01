@@ -21,6 +21,7 @@ pip-wheel-metadata
 .venv/
 .vscode/
 .python-version
+.vs/
 
 # PyTest
 .pytest_cache
